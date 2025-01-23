@@ -10,6 +10,7 @@ db.sqlite3
 *.log
 
 # Virtual environment
+myenv/
 venv/
 env/
 
