@@ -1,19 +1,106 @@
 import requests
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
-
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from django.core.exceptions import ObjectDoesNotExist
-
-from .models import Destination, Place, Food, ChatLog
-
-# LangChain Ollama imports
 from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage, HumanMessage
+
+from .models import Destination, Place, Food, ChatLog
 import json
 import traceback
+import re
+
+# Amadeus API credentials
+AMADEUS_AUTH_URL = 'https://test.api.amadeus.com/v1/security/oauth2/token'
+AMADEUS_FLIGHT_URL = 'https://test.api.amadeus.com/v2/shopping/flight-offers'
+AMADEUS_HOTEL_URL = 'https://test.api.amadeus.com/v2/shopping/hotel-offers'
+AMADEUS_CLIENT_ID = "Vh0h1Htzha6m32KUT7jnBDtd5NO6PZgW"
+AMADEUS_CLIENT_SECRET = 'nP6qQVlG8sZAxVbp'
+
+def get_amadeus_token():
+    try:
+        response = requests.post(AMADEUS_AUTH_URL, data={
+            'grant_type': 'client_credentials',
+            'client_id': AMADEUS_CLIENT_ID,
+            'client_secret': AMADEUS_CLIENT_SECRET,
+        })
+        response.raise_for_status()
+        print("✅ Amadeus Authentication Successful:", response.json())  # Debugging
+        return response.json()['access_token']
+    except requests.RequestException as e:
+        print(f"❌ Amadeus Authentication Failed: {e}")
+        print(f"❌ Response Content: {e.response.content if e.response else 'No response'}")
+        raise Exception('Failed to authenticate with Amadeus API.')
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def get_flights(request):
+    """
+    Fetch flight offers using the Amadeus API.
+    """
+    origin = request.GET.get('origin')
+    destination = request.GET.get('destination')
+    departure_date = request.GET.get('departure_date')
+
+    if not (origin and destination and departure_date):
+        return JsonResponse({'error': 'Missing required parameters (origin, destination, departure_date)'}, status=400)
+
+    try:
+        # Step 1: Authenticate with Amadeus and get access token
+        token = get_amadeus_token()
+
+        # Step 2: Fetch flight data
+        response = requests.get(
+            AMADEUS_FLIGHT_URL,
+            headers={'Authorization': f'Bearer {token}'},
+            params={
+                'originLocationCode': origin,
+                'destinationLocationCode': destination,
+                'departureDate': departure_date,
+                'adults': 1,  # Example: Fetch for 1 adult
+            },
+        )
+        response.raise_for_status()
+        flights = response.json()
+        return JsonResponse(flights, safe=False)  # Return raw Amadeus API response
+    except requests.RequestException as e:
+        print(f"get_flights: Error fetching flights: {e}")
+        return JsonResponse({'error': 'Failed to fetch flights', 'details': str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def get_hotels(request):
+    """
+    Fetch hotel offers using the Amadeus API.
+    """
+    city_code = request.GET.get('city_code')
+    check_in_date = request.GET.get('check_in_date')
+    check_out_date = request.GET.get('check_out_date')
+
+    if not (city_code and check_in_date and check_out_date):
+        return JsonResponse({'error': 'Missing required parameters (city_code, check_in_date, check_out_date)'}, status=400)
+
+    try:
+        token = get_amadeus_token()
+        response = requests.get(AMADEUS_HOTEL_URL, headers={
+            'Authorization': f'Bearer {token}'
+        }, params={
+            'cityCode': city_code,
+            'checkInDate': check_in_date,
+            'checkOutDate': check_out_date,
+            'adults': 1,
+        })
+        response.raise_for_status()
+        hotels = response.json()
+        return JsonResponse(hotels, safe=False)
+    except requests.RequestException as e:
+        print(f"get_hotels: Error fetching hotels: {e}")
+        return JsonResponse({'error': 'Failed to fetch hotels', 'details': str(e)}, status=500)
 
 @api_view(['POST'])
 def send_whatsapp_message(request):
@@ -43,107 +130,98 @@ def send_whatsapp_message(request):
         print(f"send_whatsapp_message: Error communicating with Node.js service: {e}")  # Debugging
         return Response({'error': str(e)}, status=500)
 
-
-def set_cors_headers(response):
-    """
-    Adds CORS headers to the response object.
-    """
-    response['Access-Control-Allow-Origin'] = '*'
-    response['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    response['Access-Control-Allow-Headers'] = 'Content-Type'
-    return response
-
-
 @csrf_exempt
 @require_http_methods(["POST"])
 def chat_with_bot(request):
-    print("chat_with_bot: Received request.")  # Debugging
-
     try:
         data = json.loads(request.body)
-        print("chat_with_bot: Parsed data:", data)  # Debugging
-
         user_query = data.get('query', '').strip()
-        print("chat_with_bot: User query:", user_query)  # Debugging
 
         if not user_query:
-            print("chat_with_bot: No query provided.")  # Debugging
             return JsonResponse({'error': 'No query provided'}, status=400)
 
-        # Initialize ChatOllama
-        try:
-            print("chat_with_bot: Initializing ChatOllama...")  # Debugging
+        # Detect flight-related queries
+        if 'flight' in user_query.lower():
+            origin, destination, departure_date = extract_flight_details(user_query)
+            if not (origin and destination and departure_date):
+                return JsonResponse({'error': 'Invalid flight query. Provide origin, destination, and date.'}, status=400)
 
-            system_message = SystemMessage(content="""
-                You are a travel guide chatbot. Your purpose is to provide information about destinations, places to visit, local cuisines, and best travel practices.
+            # Fetch flight data
+            try:
+                token = get_amadeus_token()
+                response = requests.get(
+                    AMADEUS_FLIGHT_URL,
+                    headers={'Authorization': f'Bearer {token}'},
+                    params={
+                        'originLocationCode': origin,
+                        'destinationLocationCode': destination,
+                        'departureDate': departure_date,
+                        'adults': 1,
+                    },
+                )
+                response.raise_for_status()
+                flight_data = response.json()
 
-                You must:
-                - Only respond to queries related to travel.
-                - Politely decline to answer questions unrelated to travel.
-                - Redirect the user to other resources if their query falls outside your scope.
-            """)
-            chatbot = ChatOllama(
-                model="llama3.2:3b",
-                host="http://localhost",
-                port=11434,
-                temperature=0
-            )
-            print("chat_with_bot: ChatOllama initialized successfully.")  # Debugging
-        except Exception as e:
-            print(f"chat_with_bot: Error initializing ChatOllama: {e}")  # Debugging
-            return JsonResponse({'error': 'Failed to initialize chatbot', 'details': str(e)}, status=500)
+                # Format response for chatbot
+                flight_responses = [
+                    f"Flight: {flight['itineraries'][0]['segments'][0]['departure']['iataCode']} to {flight['itineraries'][0]['segments'][0]['arrival']['iataCode']}, Price: ${flight['price']['total']}"
+                    for flight in flight_data.get('data', [])
+                ]
+                chatbot_response = "\n".join(flight_responses) if flight_responses else "No flights found."
+            except Exception as e:
+                chatbot_response = f"Error fetching flight details: {str(e)}"
 
-        # Generate response
-        try:
-            print(f"chat_with_bot: Sending query to ChatOllama: {user_query}")  # Debugging
-            response = chatbot([system_message, HumanMessage(content=user_query)])
-            chatbot_response = response.content if response and response.content else "No response from chatbot"
-            print(f"chat_with_bot: Response from ChatOllama: {chatbot_response}")  # Debugging
-        except Exception as e:
-            print(f"chat_with_bot: Error generating response: {e}")  # Debugging
-            return JsonResponse({'error': 'Failed to generate response', 'details': str(e)}, status=500)
+            return JsonResponse({'response': chatbot_response}, status=200)
 
-        # Save to database
-        try:
-            print("chat_with_bot: Saving chat log to database...")  # Debugging
-            ChatLog.objects.create(user_query=user_query, chatbot_response=chatbot_response)
-            print("chat_with_bot: Chat log saved successfully.")  # Debugging
-        except Exception as e:
-            print(f"chat_with_bot: Error saving chat log: {e}")  # Debugging
-            return JsonResponse({'error': 'Failed to save chat log', 'details': str(e)}, status=500)
+        # Handle general queries
+        chatbot = ChatOllama(
+            model="llama3.2:3b",
+            host="http://localhost",
+            port=11434,
+            temperature=0
+        )
+        response = chatbot([
+            SystemMessage(content="You are a travel guide chatbot."),
+            HumanMessage(content=user_query)
+        ])
+        chatbot_response = response.content if response and response.content else "No response from chatbot"
 
-        print("chat_with_bot: Returning successful response.")  # Debugging
-        return JsonResponse({'response': chatbot_response}, headers={'Access-Control-Allow-Origin': '*'}, status=200)
+        return JsonResponse({'response': chatbot_response}, status=200)
 
-    except json.JSONDecodeError:
-        print("chat_with_bot: Invalid JSON format.")  # Debugging
-        return JsonResponse({'error': 'Invalid JSON format'}, status=400)
     except Exception as e:
-        print(f"chat_with_bot: Unexpected error: {e}")  # Debugging
-        return JsonResponse({'error': 'An unexpected error occurred', 'details': str(e)}, status=500)
+        return JsonResponse({'error': 'Failed to process request', 'details': str(e)}, status=500)
 
+
+
+
+import re
+
+def extract_flight_details(query):
+    """
+    Extract flight details (origin, destination, and departure date) from user query.
+    Example query: "Find flights from DEL to NYC on 2025-01-30"
+    """
+    origin_match = re.search(r'from (\w{3})', query, re.IGNORECASE)
+    destination_match = re.search(r'to (\w{3})', query, re.IGNORECASE)
+    date_match = re.search(r'on (\d{4}-\d{2}-\d{2})', query, re.IGNORECASE)
+
+    origin = origin_match.group(1).upper() if origin_match else None
+    destination = destination_match.group(1).upper() if destination_match else None
+    departure_date = date_match.group(1) if date_match else None
+
+    return origin, destination, departure_date
 
 
 @csrf_exempt
 @require_http_methods(["GET", "POST", "OPTIONS"])
 def get_destination_details(request, destination_id):
-    print(f"get_destination_details: Received request for destination_id: {destination_id}")  # Debugging
-
+    """
+    Fetch details about a destination.
+    """
     try:
-        print("get_destination_details: Fetching destination from database...")  # Debugging
         destination = Destination.objects.get(id=destination_id)
-        print(f"get_destination_details: Destination found: {destination.name}")  # Debugging
-
-        print("get_destination_details: Fetching places and food for destination...")  # Debugging
-        places = Place.objects.filter(destination=destination)\
-       .exclude(name__iexact='unknown')\
-       .exclude(description__isnull=True)\
-       .values('name', 'description', 'category')
-        
-        food = Food.objects.filter(destination=destination)\
-        .exclude(name__iexact='unknown')\
-        .exclude(description__isnull=True)\
-        .values('name', 'description', 'cuisine_type')
+        places = Place.objects.filter(destination=destination).exclude(name__iexact='unknown').exclude(description__isnull=True).values('name', 'description', 'category')
+        food = Food.objects.filter(destination=destination).exclude(name__iexact='unknown').exclude(description__isnull=True).values('name', 'description', 'cuisine_type')
 
         response_data = {
             'destination': {
@@ -156,13 +234,9 @@ def get_destination_details(request, destination_id):
             'places': list(places),
             'food': list(food)
         }
-        print(f"get_destination_details: Response data prepared: {response_data}")  # Debugging
         return JsonResponse(response_data)
 
     except Destination.DoesNotExist:
-        print("get_destination_details: Destination not found.")  # Debugging
         return JsonResponse({'error': 'Destination not found'}, status=404)
     except Exception as e:
-        print(f"get_destination_details: Unexpected error: {e}")  # Debugging
-        print(traceback.format_exc())  # Debugging
         return JsonResponse({'error': 'An unexpected error occurred', 'details': str(e)}, status=500)

@@ -5,7 +5,7 @@ import './ChatBot.css';
 
 const api = axios.create({
     baseURL: 'http://localhost:7000/api',  // Match your Django backend port
-    timeout: 10000,
+    timeout: 30000,
     headers: {
         'Content-Type': 'application/json',
         'Accept': 'application/json'
@@ -25,41 +25,40 @@ function ChatBot() {
 
     const handleQuery = async () => {
         if (!query.trim()) return;
-
+    
         const userMessage = {
             id: Date.now(),
             text: query,
             sender: 'user'
         };
-
+    
         setMessages(prevMessages => [...prevMessages, userMessage]);
         setIsLoading(true);
-
+    
         try {
             const res = await api.post('/chat/', { query });
-
             const botMessage = {
                 id: Date.now() + 1,
-                text: res.data.response, // Backend returns Markdown-formatted response
+                text: res.data.response || 'No response from bot.',
                 sender: 'bot'
             };
-
             setMessages(prevMessages => [...prevMessages, botMessage]);
-            setQuery('');
         } catch (error) {
             console.error('Chat error:', error);
-
+    
             const errorMessage = {
                 id: Date.now() + 2,
-                text: 'Something went wrong. Please try again.',
+                text: `Error: ${error.response?.data?.error || 'Something went wrong.'}`,
                 sender: 'bot'
             };
-
             setMessages(prevMessages => [...prevMessages, errorMessage]);
         } finally {
+            setQuery('');
             setIsLoading(false);
         }
     };
+    
+    
 
     return (
         <div className="chatbot-container">

@@ -1,4 +1,7 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+# Ignore virtual environment
+myenv/
+
 # dependencies
 /node_modules
 /.pnp
@@ -22,3 +25,14 @@ yarn-error.log*
 **.node-persist**
 **_IGNORE_**
 # end managed by open-wa
+
+# Ignore Django migrations
+*/migrations/*
+!*/migrations/__init__.py
+
+# Ignore all package.json files (if applicable)
+package.json
+package-lock.json
+yarn.lock
+
+whatsapp-service/_IGNORE_session/
